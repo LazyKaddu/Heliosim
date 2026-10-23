@@ -1,8 +1,8 @@
 import React from 'react'
-
+import './App.css'
 const App = () => {
   return (
-    <div>App</div>
+    <div className='w-screen h-screen bg-blue-200 flex items-center justify-center'>App</div>
   )
 }
 
