@@ -1,9 +1,17 @@
-import React from 'react'
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import Home from "./pages/Home.tsx";
+import Simulator from "./pages/Simulator.tsx";
 import './App.css'
-const App = () => {
+
+function App() {
   return (
-    <div className='w-screen h-screen bg-blue-200 flex items-center justify-center'>App</div>
-  )
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/simulator" element={<Simulator />} />
+      </Routes>
+    </BrowserRouter>
+  );
 }
 
-export default App
+export default App;
