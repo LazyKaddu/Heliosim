@@ -6,6 +6,7 @@ import {
   createTriangleStorageBuffer,
   createSunUniformBuffer,
   updateSunUniformBuffer,
+  createBVHStorageBuffer,
   createGPUGeometryBuffers,
   resetThermalBuffer,
   destroyBuffers,
@@ -123,11 +124,11 @@ describe("WebGPUContext - Storage Buffer Lifecycle & Zero-Copy Sharing", () => {
       expect(floats[2]).toBeCloseTo(0.0, 4);
       expect(floats[3]).toBe(0.0);
 
-      // vec4 sunParams: (dni, timeStep, 0.0, 0.0)
+      // vec4 sunParams: (dni, timeStep, albedo, maxBounces)
       expect(floats[4]).toBeCloseTo(920.5, 2);
       expect(floats[5]).toBeCloseTo(0.5, 2);
-      expect(floats[6]).toBe(0.0);
-      expect(floats[7]).toBe(0.0);
+      expect(floats[6]).toBeCloseTo(0.3, 4);
+      expect(floats[7]).toBe(5.0);
     });
 
     it("updates existing sun uniform buffer via updateSunUniformBuffer", () => {
@@ -144,6 +145,43 @@ describe("WebGPUContext - Storage Buffer Lifecycle & Zero-Copy Sharing", () => {
       expect(floats[1]).toBeCloseTo(1.0, 4); // Y is 1.0 (overhead)
       expect(floats[4]).toBeCloseTo(1000.0, 2); // DNI
       expect(floats[5]).toBe(1.0); // Default timeStep is 1.0
+      expect(floats[6]).toBeCloseTo(0.3, 4); // Default albedo is 0.3
+      expect(floats[7]).toBe(5.0); // Default maxBounces is 5.0
+    });
+
+    it("writes custom albedo and maxBounces to uniform buffer", () => {
+      const device = createMockGPUDevice();
+      const buffer = createSunUniformBuffer(device);
+
+      updateSunUniformBuffer(device, buffer, {
+        direction: new THREE.Vector3(0, 1, 0),
+        dni: 850.0,
+        timeStep: 0.5,
+        albedo: 0.25,
+        maxBounces: 6,
+      });
+
+      const call = device._writeBufferCalls[device._writeBufferCalls.length - 1];
+      const floats = new Float32Array(call.data);
+      expect(floats[4]).toBeCloseTo(850.0, 2);
+      expect(floats[5]).toBe(0.5);
+      expect(floats[6]).toBe(0.25);
+      expect(floats[7]).toBe(6.0);
+    });
+  });
+
+  describe("createBVHStorageBuffer", () => {
+    it("allocates BVH storage buffer with 32-byte nodes and writes to queue", () => {
+      const device = createMockGPUDevice();
+      const mockBVH = new Float32Array(16); // 2 nodes = 64 bytes
+      mockBVH[0] = -10;
+      mockBVH[4] = 10;
+
+      const buffer = createBVHStorageBuffer(device, mockBVH);
+
+      expect(device.createBuffer).toHaveBeenCalled();
+      expect(device._writeBufferCalls.length).toBeGreaterThan(0);
+      expect(buffer).toBeDefined();
     });
   });
 
@@ -156,6 +194,8 @@ describe("WebGPUContext - Storage Buffer Lifecycle & Zero-Copy Sharing", () => {
         normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
         indices: new Uint32Array([0, 1, 2]),
         triangleBuffer: new Float32Array(16),
+        bvhNodes: new Float32Array(8),
+        bvhNodeCount: 1,
         triangleCount: 1,
         vertexCount: 3,
         boundingBox: {
@@ -176,6 +216,7 @@ describe("WebGPUContext - Storage Buffer Lifecycle & Zero-Copy Sharing", () => {
       expect(buffers.vertexBuffer).toBeDefined();
       expect(buffers.indexBuffer).toBeDefined();
       expect(buffers.thermalStorageBuffer).toBeDefined();
+      expect(buffers.bvhStorageBuffer).toBeDefined();
     });
   });
 
@@ -198,6 +239,8 @@ describe("WebGPUContext - Storage Buffer Lifecycle & Zero-Copy Sharing", () => {
         normals: new Float32Array(9),
         indices: new Uint32Array(3),
         triangleBuffer: new Float32Array(16),
+        bvhNodes: new Float32Array(8),
+        bvhNodeCount: 1,
         triangleCount: 1,
         vertexCount: 3,
         boundingBox: {
@@ -217,6 +260,7 @@ describe("WebGPUContext - Storage Buffer Lifecycle & Zero-Copy Sharing", () => {
       expect(buffers.vertexBuffer.destroy).toHaveBeenCalledTimes(1);
       expect(buffers.indexBuffer.destroy).toHaveBeenCalledTimes(1);
       expect(buffers.thermalStorageBuffer.destroy).toHaveBeenCalledTimes(1);
+      expect(buffers.bvhStorageBuffer.destroy).toHaveBeenCalledTimes(1);
     });
   });
 });

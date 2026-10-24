@@ -4,6 +4,7 @@ import {
   processBufferGeometry,
   parseXYZ,
   pointCloudToSurfelMesh,
+  buildBVH,
 } from "../GeometryProcessor.ts";
 
 describe("GeometryProcessor - Drone LiDAR Data & GPU Pipeline", () => {
@@ -170,6 +171,85 @@ describe("GeometryProcessor - Drone LiDAR Data & GPU Pipeline", () => {
       expect(gpuData.vertexCount).toBe(20);
       expect(gpuData.triangleBuffer.length).toBe(10 * 16);
       expect(gpuData.totalArea).toBeGreaterThan(0);
+      expect(gpuData.bvhNodeCount).toBeGreaterThan(0);
+      expect(gpuData.bvhNodes.length).toBe(gpuData.bvhNodeCount * 8);
+    });
+  });
+
+  describe("buildBVH - Linear Bounding Volume Hierarchy Acceleration", () => {
+    it("handles empty indices array gracefully", () => {
+      const result = buildBVH(new Float32Array(0), new Uint32Array(0));
+      expect(result.nodeCount).toBe(0);
+      expect(result.bvhNodes.length).toBe(0);
+      expect(result.reorderedIndices.length).toBe(0);
+    });
+
+    it("builds a single leaf node for a single triangle", () => {
+      const pos = new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+      const ind = new Uint32Array([0, 1, 2]);
+
+      const result = buildBVH(pos, ind);
+      expect(result.nodeCount).toBe(1);
+      expect(result.bvhNodes.length).toBe(8); // 8 floats/uints = 32 bytes
+
+      const u32 = new Uint32Array(result.bvhNodes.buffer);
+      // bounds_min: [0, 0, 0]
+      expect(result.bvhNodes[0]).toBe(0);
+      expect(result.bvhNodes[1]).toBe(0);
+      expect(result.bvhNodes[2]).toBe(0);
+      // left_first: 0 (start offset)
+      expect(u32[3]).toBe(0);
+      // bounds_max: [1, 1, 0]
+      expect(result.bvhNodes[4]).toBe(1);
+      expect(result.bvhNodes[5]).toBe(1);
+      expect(result.bvhNodes[6]).toBe(0);
+      // primitive_count: 1
+      expect(u32[7]).toBe(1);
+    });
+
+    it("builds a hierarchical BVH tree where internal nodes have consecutive children", () => {
+      const cube = new THREE.BoxGeometry(2, 2, 2);
+      const pos = cube.getAttribute("position").array as Float32Array;
+      const ind = cube.index!.array as Uint32Array;
+
+      const result = buildBVH(pos, ind, 2); // maxLeafSize = 2
+      expect(result.nodeCount).toBeGreaterThan(1);
+      expect(result.bvhNodes.length).toBe(result.nodeCount * 8);
+
+      const u32 = new Uint32Array(result.bvhNodes.buffer);
+
+      // Verify that every internal node has consecutive left child (left_first) and right child (left_first + 1)
+      for (let n = 0; n < result.nodeCount; n++) {
+        const primCount = u32[n * 8 + 7];
+        if (primCount === 0) {
+          const leftChild = u32[n * 8 + 3];
+          const rightChild = leftChild + 1;
+          expect(leftChild).toBeGreaterThan(n);
+          expect(rightChild).toBeLessThan(result.nodeCount);
+        }
+      }
+    });
+
+    it("reorders triangle indices so leaf primitives are contiguous spans", () => {
+      const cube = new THREE.BoxGeometry(4, 4, 4);
+      const gpuData = processBufferGeometry(cube);
+
+      expect(gpuData.bvhNodeCount).toBeGreaterThan(0);
+      expect(gpuData.bvhNodes.length).toBe(gpuData.bvhNodeCount * 8);
+
+      const u32 = new Uint32Array(gpuData.bvhNodes.buffer);
+      let totalLeafTriangles = 0;
+
+      for (let n = 0; n < gpuData.bvhNodeCount; n++) {
+        const primCount = u32[n * 8 + 7];
+        if (primCount > 0) {
+          const leftFirst = u32[n * 8 + 3];
+          expect(leftFirst + primCount).toBeLessThanOrEqual(gpuData.triangleCount);
+          totalLeafTriangles += primCount;
+        }
+      }
+
+      expect(totalLeafTriangles).toBe(gpuData.triangleCount);
     });
   });
 });
