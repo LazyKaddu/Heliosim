@@ -50,6 +50,18 @@ export interface GPUGeometryData {
     radius: number;
   };
 
+  /**
+   * Packed 32-byte BVH nodes formatted for WGSL:
+   * - float[0..2]: bounds_min (vec3<f32>)
+   * - uint[3]    : left_first (u32)
+   * - float[4..6]: bounds_max (vec3<f32>)
+   * - uint[7]    : primitive_count (u32)
+   */
+  bvhNodes: Float32Array;
+
+  /** Total number of BVH nodes in the linear array. */
+  bvhNodeCount: number;
+
   /** Total surface area in square meters (for physical solar kWh/m² accumulation). */
   totalArea: number;
 }
@@ -507,6 +519,10 @@ export function processBufferGeometry(
     colors = new Float32Array(colorAttr.array as Float32Array);
   }
 
+  // Build Linear BVH acceleration structure and reorder indices for spatial locality
+  const bvhResult = buildBVH(positions, indices);
+  indices.set(bvhResult.reorderedIndices);
+
   // Pack triangles for WGSL std430 storage buffer
   const { triangleBuffer, totalArea } = packTrianglesForWGSL(positions, indices, normals);
   const boundingBox = computeBoundingMetrics(positions);
@@ -516,6 +532,8 @@ export function processBufferGeometry(
     normals,
     indices,
     triangleBuffer,
+    bvhNodes: bvhResult.bvhNodes,
+    bvhNodeCount: bvhResult.nodeCount,
     colors,
     triangleCount: indices.length / 3,
     vertexCount: positions.length / 3,
@@ -523,4 +541,196 @@ export function processBufferGeometry(
     totalArea,
   };
 }
+
+export interface BVHBuildResult {
+  bvhNodes: Float32Array;
+  nodeCount: number;
+  reorderedIndices: Uint32Array;
+}
+
+/**
+ * Constructs a Linear Bounding Volume Hierarchy (BVH) matching WGSL BVHNode layout (32 bytes per node).
+ * Guarantees that internal nodes have left child at `left_first` and right child at `left_first + 1`.
+ * Reorders triangle indices so that primitives referenced by leaf nodes are contiguous.
+ *
+ * @param positions Vertex coordinates [x0, y0, z0, ...]
+ * @param indices Triangle index array [i0, i1, i2, ...]
+ * @param maxLeafSize Maximum triangles per leaf node (default: 4)
+ * @returns BVHBuildResult containing packed nodes and reordered indices
+ */
+export function buildBVH(
+  positions: Float32Array,
+  indices: Uint32Array,
+  maxLeafSize = 4
+): BVHBuildResult {
+  const triCount = Math.floor(indices.length / 3);
+  if (triCount === 0) {
+    return {
+      bvhNodes: new Float32Array(0),
+      nodeCount: 0,
+      reorderedIndices: new Uint32Array(0),
+    };
+  }
+
+  const triCentroids = new Float32Array(triCount * 3);
+  const triBounds = new Float32Array(triCount * 6);
+  const triIndices = new Uint32Array(triCount);
+
+  for (let t = 0; t < triCount; t++) {
+    triIndices[t] = t;
+    const i0 = indices[t * 3] * 3;
+    const i1 = indices[t * 3 + 1] * 3;
+    const i2 = indices[t * 3 + 2] * 3;
+
+    const v0x = positions[i0];
+    const v0y = positions[i0 + 1];
+    const v0z = positions[i0 + 2];
+
+    const v1x = positions[i1];
+    const v1y = positions[i1 + 1];
+    const v1z = positions[i1 + 2];
+
+    const v2x = positions[i2];
+    const v2y = positions[i2 + 1];
+    const v2z = positions[i2 + 2];
+
+    triCentroids[t * 3] = (v0x + v1x + v2x) / 3;
+    triCentroids[t * 3 + 1] = (v0y + v1y + v2y) / 3;
+    triCentroids[t * 3 + 2] = (v0z + v1z + v2z) / 3;
+
+    triBounds[t * 6] = Math.min(v0x, v1x, v2x);
+    triBounds[t * 6 + 1] = Math.min(v0y, v1y, v2y);
+    triBounds[t * 6 + 2] = Math.min(v0z, v1z, v2z);
+    triBounds[t * 6 + 3] = Math.max(v0x, v1x, v2x);
+    triBounds[t * 6 + 4] = Math.max(v0y, v1y, v2y);
+    triBounds[t * 6 + 5] = Math.max(v0z, v1z, v2z);
+  }
+
+  interface IntermediateNode {
+    min: [number, number, number];
+    max: [number, number, number];
+    leftFirst: number;
+    primCount: number;
+  }
+
+  const rawNodes: IntermediateNode[] = [
+    { min: [0, 0, 0], max: [0, 0, 0], leftFirst: 0, primCount: 0 },
+  ];
+
+  function populateNode(nodeIdx: number, start: number, count: number): void {
+    let minX = Infinity;
+    let minY = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let maxZ = -Infinity;
+
+    for (let i = start; i < start + count; i++) {
+      const t = triIndices[i];
+      if (triBounds[t * 6] < minX) minX = triBounds[t * 6];
+      if (triBounds[t * 6 + 1] < minY) minY = triBounds[t * 6 + 1];
+      if (triBounds[t * 6 + 2] < minZ) minZ = triBounds[t * 6 + 2];
+      if (triBounds[t * 6 + 3] > maxX) maxX = triBounds[t * 6 + 3];
+      if (triBounds[t * 6 + 4] > maxY) maxY = triBounds[t * 6 + 4];
+      if (triBounds[t * 6 + 5] > maxZ) maxZ = triBounds[t * 6 + 5];
+    }
+
+    rawNodes[nodeIdx].min = [minX, minY, minZ];
+    rawNodes[nodeIdx].max = [maxX, maxY, maxZ];
+
+    if (count <= maxLeafSize) {
+      rawNodes[nodeIdx].leftFirst = start;
+      rawNodes[nodeIdx].primCount = count;
+      return;
+    }
+
+    // Split on longest axis of centroid bounding box
+    let cMinX = Infinity;
+    let cMinY = Infinity;
+    let cMinZ = Infinity;
+    let cMaxX = -Infinity;
+    let cMaxY = -Infinity;
+    let cMaxZ = -Infinity;
+
+    for (let i = start; i < start + count; i++) {
+      const t = triIndices[i];
+      const cx = triCentroids[t * 3];
+      const cy = triCentroids[t * 3 + 1];
+      const cz = triCentroids[t * 3 + 2];
+      if (cx < cMinX) cMinX = cx;
+      if (cx > cMaxX) cMaxX = cx;
+      if (cy < cMinY) cMinY = cy;
+      if (cy > cMaxY) cMaxY = cy;
+      if (cz < cMinZ) cMinZ = cz;
+      if (cz > cMaxZ) cMaxZ = cz;
+    }
+
+    const extentX = cMaxX - cMinX;
+    const extentY = cMaxY - cMinY;
+    const extentZ = cMaxZ - cMinZ;
+    let axis = 0;
+    if (extentY > extentX && extentY > extentZ) axis = 1;
+    else if (extentZ > extentX && extentZ > extentY) axis = 2;
+
+    const mid = (start + start + count) >> 1;
+    triIndices
+      .subarray(start, start + count)
+      .sort((a, b) => triCentroids[a * 3 + axis] - triCentroids[b * 3 + axis]);
+
+    const leftCount = mid - start;
+    const rightCount = count - leftCount;
+
+    // Consecutively allocate both children so right child is always leftFirst + 1
+    const leftChildIdx = rawNodes.length;
+    const rightChildIdx = leftChildIdx + 1;
+    rawNodes.push({ min: [0, 0, 0], max: [0, 0, 0], leftFirst: 0, primCount: 0 });
+    rawNodes.push({ min: [0, 0, 0], max: [0, 0, 0], leftFirst: 0, primCount: 0 });
+
+    rawNodes[nodeIdx].leftFirst = leftChildIdx;
+    rawNodes[nodeIdx].primCount = 0;
+
+    populateNode(leftChildIdx, start, leftCount);
+    populateNode(rightChildIdx, mid, rightCount);
+  }
+
+  populateNode(0, 0, triCount);
+
+  // Build reordered indices array matching leaf primitive partition
+  const reorderedIndices = new Uint32Array(indices.length);
+  for (let t = 0; t < triCount; t++) {
+    const origTri = triIndices[t];
+    reorderedIndices[t * 3] = indices[origTri * 3];
+    reorderedIndices[t * 3 + 1] = indices[origTri * 3 + 1];
+    reorderedIndices[t * 3 + 2] = indices[origTri * 3 + 2];
+  }
+
+  // Pack into 32-byte std430 binary buffer:
+  // float[0..2]: bounds_min (vec3<f32>)
+  // uint[3]    : left_first (u32)
+  // float[4..6]: bounds_max (vec3<f32>)
+  // uint[7]    : primitive_count (u32)
+  const buffer = new ArrayBuffer(rawNodes.length * 32);
+  const f32 = new Float32Array(buffer);
+  const u32 = new Uint32Array(buffer);
+
+  for (let n = 0; n < rawNodes.length; n++) {
+    const node = rawNodes[n];
+    const off = n * 8;
+    f32[off] = node.min[0];
+    f32[off + 1] = node.min[1];
+    f32[off + 2] = node.min[2];
+    u32[off + 3] = node.leftFirst;
+    f32[off + 4] = node.max[0];
+    f32[off + 5] = node.max[1];
+    f32[off + 6] = node.max[2];
+    u32[off + 7] = node.primCount;
+  }
+
+  return {
+    bvhNodes: f32,
+    nodeCount: rawNodes.length,
+    reorderedIndices,
+  };
+}
+
 
