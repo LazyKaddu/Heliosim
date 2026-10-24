@@ -20,6 +20,11 @@ export interface GPUGeometryBuffers {
    */
   thermalStorageBuffer: GPUBuffer;
 
+  /**
+   * Storage buffer containing packed 32-byte Linear BVH nodes for raytracing acceleration.
+   */
+  bvhStorageBuffer: GPUBuffer;
+
   /** Number of triangles in the storage buffer. */
   triangleCount: number;
 
@@ -39,6 +44,12 @@ export interface SunUniforms {
 
   /** Time step in hours or seconds for cumulative integration. Default: 1.0. */
   timeStep?: number;
+
+  /** Surface albedo / reflectance factor for multi-bounce scattering (0.0 to 1.0). Default: 0.3. */
+  albedo?: number;
+
+  /** Maximum number of ray bounces for indirect radiative transfer. Default: 5. */
+  maxBounces?: number;
 }
 
 /**
@@ -225,13 +236,46 @@ export function updateSunUniformBuffer(
   data[2] = uniforms.direction.z;
   data[3] = 0.0;
 
-  // vec4<f32> sunParams: dni, timeStep, unused, unused
+  // vec4<f32> sunParams: dni, timeStep, albedo, maxBounces
   data[4] = uniforms.dni;
   data[5] = uniforms.timeStep ?? 1.0;
-  data[6] = 0.0;
-  data[7] = 0.0;
+  data[6] = uniforms.albedo ?? 0.3;
+  data[7] = uniforms.maxBounces ?? 5.0;
 
   device.queue.writeBuffer(buffer, 0, data.buffer);
+}
+
+/**
+ * Creates and populates the BVH storage buffer containing packed 32-byte BVHNode records
+ * formatted for hardware-accelerated ray traversal in compute kernels.
+ *
+ * @param device Active GPUDevice
+ * @param bvhNodes Contiguous Float32Array of packed 32-byte BVH nodes
+ * @returns Allocated GPUBuffer
+ */
+export function createBVHStorageBuffer(
+  device: GPUDevice,
+  bvhNodes: Float32Array
+): GPUBuffer {
+  const byteLength = Math.max(64, bvhNodes.byteLength);
+
+  const buffer = device.createBuffer({
+    label: "heliosim-bvh-storage-buffer",
+    size: byteLength,
+    usage: BufferUsage.STORAGE | BufferUsage.COPY_DST,
+  });
+
+  if (bvhNodes.byteLength > 0) {
+    device.queue.writeBuffer(
+      buffer,
+      0,
+      bvhNodes.buffer,
+      bvhNodes.byteOffset,
+      bvhNodes.byteLength
+    );
+  }
+
+  return buffer;
 }
 
 /**
@@ -280,11 +324,15 @@ export function createGPUGeometryBuffers(
   // 4. Shared Thermal Storage Buffer (initialized to zero)
   const thermalStorageBuffer = createThermalStorageBuffer(device, data.triangleCount);
 
+  // 5. BVH Acceleration Structure Storage Buffer
+  const bvhStorageBuffer = createBVHStorageBuffer(device, data.bvhNodes);
+
   return {
     triangleStorageBuffer,
     vertexBuffer,
     indexBuffer,
     thermalStorageBuffer,
+    bvhStorageBuffer,
     triangleCount: data.triangleCount,
     vertexCount: data.vertexCount,
   };
@@ -358,6 +406,7 @@ export function destroyBuffers(buffers: GPUGeometryBuffers): void {
     buffers.vertexBuffer.destroy();
     buffers.indexBuffer.destroy();
     buffers.thermalStorageBuffer.destroy();
+    buffers.bvhStorageBuffer.destroy();
   } catch (err) {
     console.warn("Error destroying GPU buffers:", err);
   }
