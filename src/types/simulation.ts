@@ -47,6 +47,11 @@ export interface SimulationConfig {
   showSunSphere: boolean;
   wireframe: boolean;
 
+  // Point Cloud & Model Display Options
+  renderMode?: "pointcloud" | "mesh";
+  pointSize?: number; // Point radius in meters for point cloud rendering
+  orientZUp?: boolean; // If true, rotates GIS Z-up coordinate system to Three.js Y-up
+
   // 3D Model Assets
   activeModelUrl: string | null;
   activeModelName: string;
@@ -83,6 +88,10 @@ export const INITIAL_SIMULATION_CONFIG: SimulationConfig = {
   showGrid: true,
   showSunSphere: true,
   wireframe: false,
+
+  renderMode: "pointcloud",
+  pointSize: 0.08,
+  orientZUp: false,
 
   activeModelUrl: null,
   activeModelName: "Default Scene",
