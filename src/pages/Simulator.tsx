@@ -11,11 +11,16 @@ import { Sidebar } from "../components/sidebar/Sidebar";
 import { isWebGPUSupported } from "../core/WebGPUContext";
 import { getSolarPosition, dateToDayOfYear } from "../core/SolarMath";
 import { createUrbanCanyonScene, createSolarRooftopScene } from "../utils/demoModels";
+import { loadPointCloudFile } from "../core/PointCloudLoader";
+import { pointCloudToMeshGeometry, disposeGeometry } from "../core/PointCloudMeshConverter";
 
 function Simulator() {
   const [config, setConfig] = useState<SimulationConfig>(INITIAL_SIMULATION_CONFIG);
   const [webGpuAvailable, setWebGpuAvailable] = useState<boolean>(false);
   const [presetScene, setPresetScene] = useState<THREE.Group | null>(null);
+  const [customGeometry, setCustomGeometry] = useState<THREE.BufferGeometry | null>(null);
+  const [isLoadingModel, setIsLoadingModel] = useState<boolean>(false);
+  const [modelError, setModelError] = useState<string | null>(null);
 
   useEffect(() => {
     setWebGpuAvailable(isWebGPUSupported());
@@ -61,6 +66,12 @@ function Simulator() {
 
   // Handler for demo presets
   const handleSelectPresetScene = (presetId: string) => {
+    if (customGeometry) {
+      disposeGeometry(customGeometry);
+      setCustomGeometry(null);
+    }
+    setModelError(null);
+
     if (presetId === "urban-canyon") {
       const scene = createUrbanCanyonScene();
       setPresetScene(scene);
@@ -83,6 +94,79 @@ function Simulator() {
           bounds: { x: 30, y: 15, z: 30 },
         },
       });
+    }
+  };
+
+  // Clean up 3D geometry on unmount to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      if (customGeometry) {
+        disposeGeometry(customGeometry);
+      }
+    };
+  }, [customGeometry]);
+
+  // Ingestion handler for custom uploaded point clouds (.ply, .las, .laz, .xyz)
+  const handleLoadCustomFile = async (file: File) => {
+    setIsLoadingModel(true);
+    setModelError(null);
+
+    // 1. Immediately dispose and detach previous custom geometry to free GPU VRAM & RAM
+    if (customGeometry) {
+      disposeGeometry(customGeometry);
+      setCustomGeometry(null);
+    }
+
+    try {
+      // 2. Strip headers and parse with streaming chunk-read and on-the-fly stride downsampling
+      const pointData = await loadPointCloudFile(file, {
+        maxPoints: 500000,
+      });
+
+      // 3. Convert points into renderable 3D geometry
+      const newGeometry = pointCloudToMeshGeometry(pointData, {
+        centerAtOrigin: true,
+        renderMode: config.renderMode ?? "pointcloud",
+      });
+
+      const isPointCloud = Boolean(newGeometry.userData?.isPointCloud);
+      const isZUp = Boolean(newGeometry.userData?.isZUp);
+
+      setCustomGeometry(newGeometry);
+      setPresetScene(null);
+
+      // 4. Update configuration and telemetry stats
+      const triangleCount = newGeometry.index
+        ? newGeometry.index.count / 3
+        : 0;
+      const vertexCount = newGeometry.attributes.position.count;
+      const bounds = pointData.bounds.dimensions;
+
+      updateConfig({
+        activeModelName: file.name,
+        orientZUp: isZUp,
+        renderMode: isPointCloud ? "pointcloud" : "mesh",
+        meshStats: {
+          triangles: Math.round(triangleCount),
+          vertices: vertexCount,
+          bounds: {
+            x: Number(bounds[0].toFixed(2)),
+            y: Number(bounds[1].toFixed(2)),
+            z: Number(bounds[2].toFixed(2)),
+          },
+        },
+      });
+
+      // 5. Release raw pointData buffers so GC can reclaim them immediately
+      (pointData as any).positions = null;
+      (pointData as any).colors = null;
+      (pointData as any).normals = null;
+      (pointData as any).indices = null;
+    } catch (err: any) {
+      console.error("Failed to load point cloud file:", err);
+      setModelError(err?.message || "Failed to parse point cloud file.");
+    } finally {
+      setIsLoadingModel(false);
     }
   };
 
@@ -141,8 +225,40 @@ function Simulator() {
             <gridHelper args={[40, 40, "#444444", "#1a1a1a"]} />
           )}
 
-          {/* 3D Scene Geometry: Either Loaded Preset or Default Target */}
-          {presetScene ? (
+          {/* 3D Scene Geometry: Custom Loaded Point Cloud / Mesh OR Demo Preset OR Default Target */}
+          {customGeometry ? (
+            customGeometry.userData?.isPointCloud && config.renderMode !== "mesh" ? (
+              <points
+                geometry={customGeometry}
+                rotation={config.orientZUp ? [-Math.PI / 2, 0, 0] : [0, 0, 0]}
+              >
+                <pointsMaterial
+                  size={config.pointSize ?? 0.08}
+                  vertexColors={Boolean(customGeometry.getAttribute("color"))}
+                  sizeAttenuation
+                  transparent={config.opacity < 1.0}
+                  opacity={config.opacity}
+                />
+              </points>
+            ) : (
+              <mesh
+                geometry={customGeometry}
+                rotation={config.orientZUp ? [-Math.PI / 2, 0, 0] : [0, 0, 0]}
+                castShadow
+                receiveShadow
+              >
+                <meshStandardMaterial
+                  color={customGeometry.getAttribute("color") ? "#ffffff" : materialColor}
+                  roughness={0.35}
+                  metalness={0.15}
+                  wireframe={config.wireframe}
+                  opacity={config.opacity}
+                  transparent={config.opacity < 1.0}
+                  vertexColors={Boolean(customGeometry.getAttribute("color"))}
+                />
+              </mesh>
+            )
+          ) : presetScene ? (
             <primitive object={presetScene} />
           ) : (
             <mesh position={[0, 1.0, 0]}>
@@ -162,13 +278,25 @@ function Simulator() {
           <OrbitControls makeDefault />
         </Canvas>
 
+        {/* Loading Overlay */}
+        {isLoadingModel && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/75 backdrop-blur-sm pointer-events-none">
+            <div className="w-9 h-9 border-2 border-white border-t-transparent rounded-full animate-spin mb-3" />
+            <span className="font-mono text-xs text-white tracking-widest font-semibold">
+              INGESTING LIDAR POINT CLOUD DATA...
+            </span>
+            <span className="font-mono text-[11px] text-neutral-400 mt-1">
+              Stripping binary headers & generating 3D surface mesh
+            </span>
+          </div>
+        )}
+
         {/* Floating Viewport Telemetry Badge (Top Left) */}
         <div className="absolute top-4 left-4 z-10 bg-black/90 border border-[#262626] px-3.5 py-2 font-mono text-xs backdrop-blur-md">
           <div className="flex items-center gap-2">
             <span
-              className={`w-2 h-2 ${
-                solarEphemeris.isDaylight ? "bg-white" : "bg-neutral-600"
-              }`}
+              className={`w-2 h-2 ${solarEphemeris.isDaylight ? "bg-white" : "bg-neutral-600"
+                }`}
             />
             <span className="font-semibold text-white tracking-wider">
               {config.cityName.toUpperCase()}
@@ -189,6 +317,9 @@ function Simulator() {
         onChange={updateConfig}
         webGpuAvailable={webGpuAvailable}
         onSelectPresetScene={handleSelectPresetScene}
+        onLoadCustomFile={handleLoadCustomFile}
+        isLoadingModel={isLoadingModel}
+        modelError={modelError}
       />
     </div>
   );
