@@ -366,7 +366,6 @@ export function pointCloudToSurfelMesh(
  * @returns Three.js BufferGeometry containing positions, normals, and colors if present
  */
 export function parseXYZ(text: string): THREE.BufferGeometry {
-  const lines = text.split(/\r?\n/);
   const positions: number[] = [];
   const colors: number[] = [];
   const normals: number[] = [];
@@ -374,9 +373,17 @@ export function parseXYZ(text: string): THREE.BufferGeometry {
   let hasColors = false;
   let hasNormals = false;
 
-  for (let l = 0; l < lines.length; l++) {
-    const line = lines[l].trim();
-    if (!line || line.startsWith("#") || line.startsWith("//")) {
+  let pos = 0;
+  const len = text.length;
+
+  while (pos < len) {
+    let nextNewline = text.indexOf("\n", pos);
+    if (nextNewline === -1) nextNewline = len;
+
+    let line = text.substring(pos, nextNewline).trim();
+    pos = nextNewline + 1;
+
+    if (!line || line.charCodeAt(0) === 35 /* '#' */ || line.startsWith("//")) {
       continue;
     }
 
