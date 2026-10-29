@@ -13,6 +13,8 @@ interface SidebarProps {
   webGpuAvailable: boolean;
   onLoadCustomFile?: (file: File) => void;
   onSelectPresetScene?: (presetId: string) => void;
+  isLoadingModel?: boolean;
+  modelError?: string | null;
 }
 
 export function Sidebar({
@@ -21,6 +23,8 @@ export function Sidebar({
   webGpuAvailable,
   onLoadCustomFile,
   onSelectPresetScene,
+  isLoadingModel = false,
+  modelError = null,
 }: SidebarProps) {
   return (
     <ThemeProvider theme={monoTheme}>
@@ -64,6 +68,8 @@ export function Sidebar({
               onChange={onChange}
               onLoadCustomFile={onLoadCustomFile}
               onSelectPresetScene={onSelectPresetScene}
+              isLoading={isLoadingModel}
+              error={modelError}
             />
           )}
           {config.activeTab === "heatmap" && (
