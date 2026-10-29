@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { Box, Typography, Button, Switch } from "@mui/material";
+import { Box, Typography, Button, Switch, Slider } from "@mui/material";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import { SimulationConfig } from "../../types/simulation";
 
@@ -8,6 +8,8 @@ interface ModelTabProps {
   onChange: (patch: Partial<SimulationConfig>) => void;
   onLoadCustomFile?: (file: File) => void;
   onSelectPresetScene?: (presetId: string) => void;
+  isLoading?: boolean;
+  error?: string | null;
 }
 
 export function ModelTab({
@@ -15,6 +17,8 @@ export function ModelTab({
   onChange,
   onLoadCustomFile,
   onSelectPresetScene,
+  isLoading = false,
+  error = null,
 }: ModelTabProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -23,6 +27,8 @@ export function ModelTab({
       const file = e.target.files[0];
       onChange({ activeModelName: file.name });
       if (onLoadCustomFile) onLoadCustomFile(file);
+      // Reset input value so the browser does not retain the File object in DOM memory
+      e.target.value = "";
     }
   };
 
@@ -48,32 +54,33 @@ export function ModelTab({
               fontSize: "0.6875rem",
             }}
           >
-            3D MESH INGESTION
+            LIDAR POINT CLOUD INGESTION
           </Typography>
           <Typography
             variant="caption"
             sx={{ color: "#737373", fontSize: "0.625rem" }}
           >
-            .glb / .gltf / .obj
+            .ply / .las / .laz / .xyz
           </Typography>
         </Box>
 
         <input
           ref={fileInputRef}
           type="file"
-          accept=".glb,.gltf,.obj,.ply,.xyz"
+          accept=".ply,.las,.laz,.xyz,.glb,.gltf,.obj"
           onChange={handleFileChange}
           style={{ display: "none" }}
         />
 
         <Box
-          onClick={() => fileInputRef.current?.click()}
+          onClick={() => !isLoading && fileInputRef.current?.click()}
           sx={{
-            cursor: "pointer",
+            cursor: isLoading ? "wait" : "pointer",
             p: 3,
             textAlign: "center",
-            border: "1px dashed #333333",
-            bgcolor: "#050505",
+            border: "1px dashed",
+            borderColor: isLoading ? "#ffffff" : "#333333",
+            bgcolor: isLoading ? "#141414" : "#050505",
             transition: "all 0.2s",
             "&:hover": {
               borderColor: "#ffffff",
@@ -81,20 +88,37 @@ export function ModelTab({
             },
           }}
         >
-          <CloudUploadIcon sx={{ fontSize: 28, color: "#8a8a8a", mb: 1 }} />
+          <CloudUploadIcon
+            sx={{
+              fontSize: 28,
+              color: isLoading ? "#ffffff" : "#8a8a8a",
+              mb: 1,
+              animation: isLoading ? "pulse 1.5s infinite" : "none",
+            }}
+          />
           <Typography
             variant="caption"
             sx={{ display: "block", color: "#ffffff", fontWeight: 600, fontSize: "0.75rem" }}
           >
-            LOAD 3D LIDAR / MESH
+            {isLoading ? "CONVERTING POINT CLOUD..." : "LOAD 3D LIDAR / MESH"}
           </Typography>
           <Typography
             variant="caption"
             sx={{ display: "block", color: "#737373", fontSize: "0.625rem", mt: 0.5 }}
           >
-            Click to browse photogrammetry file
+            {isLoading
+              ? "Stripping headers and generating 3D surface mesh"
+              : "Click to browse .ply, .las, .laz, or .xyz file"}
           </Typography>
         </Box>
+
+        {error && (
+          <Box sx={{ p: 1, bgcolor: "#3b0000", border: "1px solid #7f1d1d" }}>
+            <Typography variant="caption" sx={{ color: "#fca5a5", fontSize: "0.6875rem" }}>
+              {error}
+            </Typography>
+          </Box>
+        )}
 
         {/* Active asset */}
         <Box
@@ -236,7 +260,103 @@ export function ModelTab({
         </Box>
       )}
 
-      {/* 4. Viewport Overlays */}
+      {/* 4. Point Cloud & Display Mode */}
+      <Box sx={{ display: "flex", flexDirection: "column", gap: 1.25, pt: 1, borderTop: "1px solid #262626" }}>
+        <Typography
+          variant="caption"
+          sx={{
+            fontWeight: 700,
+            letterSpacing: "0.1em",
+            color: "#ffffff",
+            fontSize: "0.6875rem",
+          }}
+        >
+          DISPLAY MODE & ORIENTATION
+        </Typography>
+
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1 }}>
+            <Button
+              size="small"
+              variant={config.renderMode !== "mesh" ? "contained" : "outlined"}
+              onClick={() => onChange({ renderMode: "pointcloud" })}
+              sx={{
+                bgcolor: config.renderMode !== "mesh" ? "#ffffff" : "#0a0a0a",
+                color: config.renderMode !== "mesh" ? "#000000" : "#a3a3a3",
+                borderColor: "#262626",
+                fontSize: "0.6875rem",
+                fontWeight: 700,
+                "&:hover": {
+                  bgcolor: config.renderMode !== "mesh" ? "#e5e5e5" : "#171717",
+                },
+              }}
+            >
+              Point Cloud
+            </Button>
+            <Button
+              size="small"
+              variant={config.renderMode === "mesh" ? "contained" : "outlined"}
+              onClick={() => onChange({ renderMode: "mesh" })}
+              sx={{
+                bgcolor: config.renderMode === "mesh" ? "#ffffff" : "#0a0a0a",
+                color: config.renderMode === "mesh" ? "#000000" : "#a3a3a3",
+                borderColor: "#262626",
+                fontSize: "0.6875rem",
+                fontWeight: 700,
+                "&:hover": {
+                  bgcolor: config.renderMode === "mesh" ? "#e5e5e5" : "#171717",
+                },
+              }}
+            >
+              Surface Mesh
+            </Button>
+          </Box>
+
+          {config.renderMode !== "mesh" && (
+            <Box sx={{ p: 1, border: "1px solid #262626", bgcolor: "#050505" }}>
+              <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.5 }}>
+                <Typography variant="caption" sx={{ color: "#737373", fontSize: "0.625rem" }}>
+                  POINT SIZE
+                </Typography>
+                <Typography variant="caption" sx={{ color: "#ffffff", fontWeight: 600, fontSize: "0.625rem" }}>
+                  {(config.pointSize ?? 0.08).toFixed(2)}m
+                </Typography>
+              </Box>
+              <Slider
+                size="small"
+                min={0.01}
+                max={0.5}
+                step={0.01}
+                value={config.pointSize ?? 0.08}
+                onChange={(_, v) => onChange({ pointSize: v as number })}
+                sx={{
+                  color: "#ffffff",
+                  height: 3,
+                  "& .MuiSlider-thumb": { width: 10, height: 10 },
+                }}
+              />
+            </Box>
+          )}
+
+          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", p: 1, border: "1px solid #262626", bgcolor: "#050505" }}>
+            <Box>
+              <Typography variant="caption" sx={{ color: "#ffffff", fontSize: "0.6875rem", display: "block" }}>
+                Z-Up (GIS LiDAR)
+              </Typography>
+              <Typography variant="caption" sx={{ color: "#525252", fontSize: "0.5625rem" }}>
+                Rotate Elevation from Z to Y
+              </Typography>
+            </Box>
+            <Switch
+              size="small"
+              checked={Boolean(config.orientZUp)}
+              onChange={(e) => onChange({ orientZUp: e.target.checked })}
+            />
+          </Box>
+        </Box>
+      </Box>
+
+      {/* 5. Viewport Overlays */}
       <Box sx={{ display: "flex", flexDirection: "column", gap: 1.25, pt: 1, borderTop: "1px solid #262626" }}>
         <Typography
           variant="caption"
